@@ -122,7 +122,7 @@ class IonAuth
 		if ($user)
 		{
 			// Generate code
-			$code = $this->ionAuthModel->forgottenPassword($identity);
+			$code = $this->ionAuthModel->forgottenPassword($identity, $user->id);
 
 			if ($code)
 			{
@@ -337,7 +337,7 @@ class IonAuth
 		$this->ionAuthModel->triggerEvents('logged_in');
 
 		$recheck = $this->ionAuthModel->recheckSession();
-
+		
 		// auto-login the user if they are remembered
 		if (! $recheck && get_cookie($this->config->rememberCookieName))
 		{

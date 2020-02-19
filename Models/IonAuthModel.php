@@ -295,7 +295,7 @@ class IonAuthModel
 	 * @return boolean
 	 * @author Mathew
 	 */
-	public function verifyPassword(string $password, string $hashPasswordDb, string $identity=''): bool
+	public function verifyPassword(string $password, string $hashPasswordDb): bool
 	{
 		// Check for empty id or password, or password containing null char, or password above limit
 		// Null char may pose issue: http://php.net/manual/en/function.password-hash.php#118603
@@ -437,7 +437,7 @@ class IonAuthModel
 			return false;
 		}
 
-		$token                = $this->generateSelectorValidatorCouple(20, 40);
+		$token                = $this->generateSelectorValidatorCouple(20, 40, $id);
 		$this->activationCode = $token->userCode;
 
 		$data = [
@@ -573,7 +573,7 @@ class IonAuthModel
 
 		$user = $query->row();
 
-		if ($this->verifyPassword($old, $user->password, $identity))
+		if ($this->verifyPassword($old, $user->password))
 		{
 			$result = $this->setPasswordDb($identity, $new);
 
@@ -707,7 +707,7 @@ class IonAuthModel
 	 * @author Mathew
 	 * @author Ryan
 	 */
-	public function forgottenPassword(string $identity)
+	public function forgottenPassword(string $identity, $userId)
 	{
 		if (empty($identity))
 		{
@@ -716,7 +716,7 @@ class IonAuthModel
 		}
 
 		// Generate random token: smaller size because it will be in the URL
-		$token = $this->generateSelectorValidatorCouple(20, 80);
+		$token = $this->generateSelectorValidatorCouple(20, 80, $userId);
 
 		$update = [
 			'forgotten_password_selector' => $token->selector,
@@ -871,7 +871,7 @@ class IonAuthModel
 	 * @return boolean
 	 * @author Mathew
 	 */
-	public function login(string $identity, string $password, bool $remember=false): bool
+	public function login(string $identity, string $password, bool $remember=true): bool
 	{
 		$this->triggerEvents('pre_login');
 
@@ -904,7 +904,7 @@ class IonAuthModel
 
 		if (isset($user))
 		{
-			if ($this->verifyPassword($password, $user->password, $identity))
+			if ($this->verifyPassword($password, $user->password))
 			{
 				if ($user->active === 0)
 				{
@@ -925,7 +925,7 @@ class IonAuthModel
 				{
 					if ($remember)
 					{
-						$this->rememberUser($identity);
+						$this->rememberUser($identity, $user->id);
 					}
 					else
 					{
@@ -1974,7 +1974,7 @@ class IonAuthModel
 	 * @return boolean
 	 * @author Ben Edmunds
 	 */
-	public function rememberUser(string $identity): bool
+	public function rememberUser(string $identity, $userId): bool
 	{
 		$this->triggerEvents('pre_remember_user');
 
@@ -1984,15 +1984,18 @@ class IonAuthModel
 		}
 
 		// Generate random tokens
-		$token = $this->generateSelectorValidatorCouple();
+		$token = $this->generateSelectorValidatorCouple(40, 128, $userId);
 
 		if ($token->validatorHashed)
 		{
-			$this->db->table($this->tables['users'])->update(['remember_selector' => $token->selector,
-								  			   'remember_code' => $token->validatorHashed],
-											   [$this->identityColumn => $identity]);
+			$this->db->table('users_auth')->insert([
+					'remember_selector' => $token->selector,
+					'remember_code' => $token->validatorHashed,
+					'user_id' => $userId,
+					'time' => time(),
+				]);
 
-			if ($this->db->affectedRows() > -1)
+			if ($this->db->affectedRows() > 0)
 			{
 				// if the userExpire is set to zero we'll set the expiration two years from now.
 				if ( $this->config->userExpire === 0)
@@ -2005,12 +2008,14 @@ class IonAuthModel
 					$expire = $this->config->userExpire;
 				}
 
-				set_cookie([
+				$res = set_cookie([
 					'name'   => $this->config->rememberCookieName,
 					'value'  => $token->userCode,
 					'expire' => $expire
 				]);
-
+				
+				\Config\Services::response()->send();
+				
 				$this->triggerEvents(['post_remember_user', 'remember_user_successful']);
 				return true;
 			}
@@ -2035,31 +2040,30 @@ class IonAuthModel
 		// Retrieve token from cookie
 		$rememberCookie = get_cookie($this->config->rememberCookieName);
 		$token          = $this->retrieveSelectorValidatorCouple($rememberCookie);
-
+		
 		if ($token === false)
 		{
 			$this->triggerEvents(['post_login_remembered_user', 'post_login_remembered_user_unsuccessful']);
 			return false;
 		}
-
+		
 		// get the user with the selector
 		$this->triggerEvents('extra_where');
-		$query = $this->db->table($this->tables['users'])
-						  ->select($this->identityColumn . ', id, email, remember_code, last_login')
-						  ->where('remember_selector', $token->selector)
-						  ->where('active', 1)
+		$query = $this->db->table('users')
+						  ->select('users.'.$this->identityColumn . ', users.id, users.email, ua.remember_code, users.last_login')
+						  ->where('ua.remember_selector', $token->selector)
+						  ->where('users.active', 't')
+						  ->join('users_auth ua', 'users.id = ua.user_id and ua.user_id='.intval($token->userId))
 						  ->limit(1)
 						  ->get();
 
 		// Check that we got the user
-		if ($query->numRows() === 1)
+		if ($user = $query->getRow())
 		{
-			// Retrieve the information
-			$user = $query->row();
-
 			// Check the code against the validator
 			$identity = $user->{$this->identityColumn};
-			if ($this->verifyPassword($token->validator, $user->remember_code, $identity))
+
+			if ($this->verifyPassword($token->validator, $user->remember_code))
 			{
 				$this->updateLastLogin($user->id);
 
@@ -2070,7 +2074,7 @@ class IonAuthModel
 				// extend the users cookies if the option is enabled
 				if ($this->config->userExtendonLogin)
 				{
-					$this->rememberUser($identity);
+					$this->rememberUser($identity, $user->id);
 				}
 
 				// Regenerate the session (for security purpose: to avoid session fixation)
@@ -2080,7 +2084,7 @@ class IonAuthModel
 				return true;
 			}
 		}
-		delete_cookie($this->config->rememberCookieName);
+		// delete_cookie($this->config->rememberCookieName);
 
 		$this->triggerEvents(['post_login_remembered_user', 'post_login_remembered_user_unsuccessful']);
 		return false;
@@ -2705,7 +2709,7 @@ class IonAuthModel
 	 *          ->validatorHashed	token (hashed) to validate the user (to store in DB)
 	 *          ->user_code			code to be used user-side (in cookie or URL)
 	 */
-	protected function generateSelectorValidatorCouple(int $selectorSize=40, int $validatorSize=128): \stdClass
+	protected function generateSelectorValidatorCouple(int $selectorSize=40, int $validatorSize=128, $userId = 0): \stdClass
 	{
 		// The selector is a simple token to retrieve the user
 		$selector = $this->randomToken($selectorSize);
@@ -2717,7 +2721,7 @@ class IonAuthModel
 		$validatorHashed = $this->hashPassword($validator);
 
 		// The code to be used user-side
-		$userCode = $selector . '.' . $validator;
+		$userCode = $userId . '.' . $selector . '.' . $validator;
 
 		return (object) [
 			'selector'        => $selector,
@@ -2743,11 +2747,12 @@ class IonAuthModel
 			$tokens = explode('.', $userCode);
 
 			// Check tokens
-			if (count($tokens) === 2)
+			if (count($tokens) === 3)
 			{
 				return (object) [
-					'selector'  => $tokens[0],
-					'validator' => $tokens[1],
+					'userId'    => $tokens[0],
+					'selector'  => $tokens[1],
+					'validator' => $tokens[2],
 				];
 			}
 		}

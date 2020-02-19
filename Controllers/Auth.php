@@ -123,6 +123,11 @@ class Auth extends \CodeIgniter\Controller
 	 */
 	public function login()
 	{
+		if ($this->ionAuth->loggedIn())
+		{
+			return redirect()->to('/');
+		}
+		
 		$this->data['title'] = lang('Auth.login_heading');
 
 		// validate form input
